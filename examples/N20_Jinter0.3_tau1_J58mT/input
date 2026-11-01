@@ -1,0 +1,36 @@
+material:file = multilayer.mat
+material:unit-cell-file = multilayer.ucf
+
+dimensions:system-size-x = 2 !nm
+dimensions:system-size-y = 2 !nm
+dimensions:system-size-z = 70.8000 !A
+
+create:periodic-boundaries-x = true
+create:periodic-boundaries-y = true
+
+sim:program = hysteresis-loop
+sim:integrator = llg-heun
+sim:temperature = 0.01
+sim:time-step = 0.01 !ps
+sim:time-steps-increment = 100
+sim:integrator-random-seed = 1
+
+sim:equilibration-time-steps = 100000
+sim:loop-time-steps = 200000
+sim:maximum-applied-field-strength = 0.5000 !T
+sim:applied-field-strength-increment = 0.0100 !T
+sim:applied-field-unit-vector = 0.0, 0.0, 1.0
+
+sim:spin-transfer-torque-polarization-unit-vector = 0, 0, -1
+
+spin-transport:current-direction = +z
+spin-transport:cell-size-x = 3.54 !A
+spin-transport:cell-size-y = 3.54 !A
+spin-transport:cell-size-z = 3.54 !A
+spin-transport:applied-voltage = 0.01 !V
+spin-transport:update-rate = 1
+
+output:applied-field-strength
+output:magnetisation
+output:material-magnetisation
+output:column-headers

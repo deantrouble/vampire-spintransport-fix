@@ -1,0 +1,137 @@
+diff --git a/src/spintransport/initialize.cpp b/src/spintransport/initialize.cpp
+index 8c596c58..f9995cc3 100644
+--- a/src/spintransport/initialize.cpp
++++ b/src/spintransport/initialize.cpp
+@@ -11,9 +11,13 @@
+ //
+ 
+ // C++ standard library headers
++#include <algorithm>
++#include <cmath>
++#include <limits>
+ 
+ // Vampire headers
+ #include "create.hpp"
++#include "errors.hpp"
+ #include "spintransport.hpp"
+ #include "vio.hpp"
+ #include "vmpi.hpp"
+@@ -30,6 +34,69 @@ namespace spin_transport{
+       std::vector<uint64_t> nm_atom; // list of non-magnetic atoms in each cell
+    };
+ 
++   namespace{
++
++      //----------------------------------------------------------------------------
++      // Snap a floating-point value onto the nearest integer if it lies within a
++      // small tolerance of it. Cell-boundary coordinates generated from ratios
++      // such as N*cell_size/N are not guaranteed to equal the intended integer
++      // exactly in IEEE-754 arithmetic (e.g. 3.0 may arrive as 2.9999999999999996),
++      // so a naive floor()/static_cast<int>() on the raw quotient silently
++      // misassigns the atom/cell count by one. Values that are genuinely not near
++      // an integer (e.g. 2.7) are returned unchanged so real interior positions
++      // are never snapped to the wrong cell.
++      //----------------------------------------------------------------------------
++      double snap_near_integer(const double value){
++         const double nearest = std::round(value);
++         const double tolerance = 64.0 * std::numeric_limits<double>::epsilon() * std::max(1.0, std::abs(value));
++         if(std::abs(value - nearest) <= tolerance) return nearest;
++         return value;
++      }
++
++      //----------------------------------------------------------------------------
++      // Number of spin-transport cells spanning a system dimension, robust to
++      // floating-point error in system_size/cell_size landing just below an
++      // integer (which would otherwise make ceil() round up to one cell too many).
++      //----------------------------------------------------------------------------
++      int calculate_number_of_cells(const double system_size, const double cell_size){
++         if(cell_size <= 0.0){
++            terminaltextcolor(RED);
++            std::cerr << "Error - spin-transport cell size must be positive" << std::endl;
++            terminaltextcolor(WHITE);
++            zlog << zTs() << "Error - spin-transport cell size must be positive" << std::endl;
++            err::vexit();
++         }
++         const double quotient = snap_near_integer(system_size / cell_size);
++         return static_cast<int>(std::ceil(quotient));
++      }
++
++      //----------------------------------------------------------------------------
++      // Cell index along one axis for an atom at the given coordinate, robust to
++      // floating-point error at exact cell boundaries (which would otherwise
++      // truncate to the cell below). Coordinates that fall genuinely outside the
++      // cell grid (rather than merely rounding error at the outer boundary) are
++      // treated as a fatal input error rather than silently clamped, since a
++      // silent clamp could mask a real out-of-range configuration.
++      //----------------------------------------------------------------------------
++      unsigned int calculate_cell_id(const double coordinate, const double cell_size, const int number_of_cells){
++         const double quotient = snap_near_integer(coordinate / cell_size);
++         const long long cell_id = static_cast<long long>(std::floor(quotient));
++         if(cell_id < 0 || cell_id >= static_cast<long long>(number_of_cells)){
++            terminaltextcolor(RED);
++            std::cerr << "Error - spin-transport atom coordinate " << coordinate
++                       << " lies outside the spin-transport cell grid (cell " << cell_id
++                       << " of " << number_of_cells << ")" << std::endl;
++            terminaltextcolor(WHITE);
++            zlog << zTs() << "Error - spin-transport atom coordinate " << coordinate
++                 << " lies outside the spin-transport cell grid (cell " << cell_id
++                 << " of " << number_of_cells << ")" << std::endl;
++            err::vexit();
++         }
++         return static_cast<unsigned int>(cell_id);
++      }
++
++   } // end of anonymous namespace
++
+    //----------------------------------------------------------------------------
+    // Function to initialize spin transport module
+    //----------------------------------------------------------------------------
+@@ -91,10 +158,11 @@ namespace spin_transport{
+                                     st::internal::cell_size_y,
+                                     st::internal::cell_size_z };
+ 
+-      // calculate number of cells in each direction x,y,z (rounding up)
+-      const int num_cells[3] = { static_cast<int>( ceil(system_size_x/cell_size[0]) ),
+-                                 static_cast<int>( ceil(system_size_y/cell_size[1]) ),
+-                                 static_cast<int>( ceil(system_size_z/cell_size[2]) ) };
++      // calculate number of cells in each direction x,y,z (rounding up, tolerant of
++      // floating-point error at exact integer ratios -- see calculate_number_of_cells)
++      const int num_cells[3] = { calculate_number_of_cells(system_size_x, cell_size[0]),
++                                 calculate_number_of_cells(system_size_y, cell_size[1]),
++                                 calculate_number_of_cells(system_size_z, cell_size[2]) };
+ 
+ 
+       int stack_x = 0; // spatial direction of stack arrays  x,y,z
+@@ -161,10 +229,11 @@ namespace spin_transport{
+          const double cy = atoms_y_coord_array[atom];
+          const double cz = atoms_z_coord_array[atom];
+ 
+-         // calculate 3D cell ID in atoms coordinate system
+-         unsigned int cellID[3] = { static_cast<unsigned int>( cx / cell_size[0] ),
+-                                    static_cast<unsigned int>( cy / cell_size[1] ),
+-                                    static_cast<unsigned int>( cz / cell_size[2] ) };
++         // calculate 3D cell ID in atoms coordinate system, tolerant of floating-point
++         // error at exact cell boundaries -- see calculate_cell_id
++         unsigned int cellID[3] = { calculate_cell_id(cx, cell_size[0], num_cells[0]),
++                                    calculate_cell_id(cy, cell_size[1], num_cells[1]),
++                                    calculate_cell_id(cz, cell_size[2], num_cells[2]) };
+ 
+          // now calculate in stack coordinate system
+          const uint64_t i = cellID[stack_x];
+@@ -371,9 +440,13 @@ namespace spin_transport{
+       // Calculate average cell parameters
+       //-----------------------------------------------------------------------------------------------
+ 
+-      // cell size parameters for resitivity to resistance calculation
+-      const double iA = 1.0 / (cell_size[stack_x] * cell_size[stack_y]); // Angstroms^-2
+-      const double l = cell_size[stack_z];
++      // Cell dimensions are stored internally in Angstroms, while resistivity is stored in Ohm metres.
++      // Convert the geometry to SI units so rho * l / A gives resistance in Ohms.
++      constexpr double angstrom_to_metre = 1.0e-10;
++      const double lx = cell_size[stack_x] * angstrom_to_metre;
++      const double ly = cell_size[stack_y] * angstrom_to_metre;
++      const double l  = cell_size[stack_z] * angstrom_to_metre;
++      const double iA = 1.0 / (lx * ly); // metres^-2
+ 
+       // constant prefactor for STT components
+       const double one_o_gamma_e = 1.0 / (1.76e11 * 1.602e-19);  // muB / (gamma * e) but cell saturation already specified in muB's
